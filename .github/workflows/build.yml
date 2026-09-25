@@ -1,0 +1,96 @@
+# Build simplewall from source on GitHub-hosted Windows runners.
+#
+# How to use:
+#   1. Fork https://github.com/henrypp/simplewall  (or create any repo and push a
+#      copy of the sources) — the fork must have this file at
+#      .github/workflows/build.yml
+#   2. Actions tab -> "build-simplewall" -> Run workflow
+#   3. Download the artifact "simplewall-x64" / "simplewall-ARM64"
+#
+# Notes:
+#   * simplewall.vcxproj expects the `routine` repo as a SIBLING directory
+#     (IncludePath = .\..\routine\src\), so both repos are checked out side by side.
+#   * The project hardcodes PlatformToolset v145 (VS 2026). The step below picks
+#     the newest toolset actually installed on the runner and overrides it.
+
+name: build-simplewall
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ x64, ARM64 ]
+
+    steps:
+      - name: Checkout simplewall
+        uses: actions/checkout@v4
+        with:
+          path: simplewall
+          submodules: false
+
+      - name: Checkout routine (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: henrypp/routine
+          path: routine
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Pick installed MSVC toolset
+        id: toolset
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere not found - no Visual Studio on runner" }
+          $inst = & $vswhere -latest -products * -property installationPath
+          Write-Host "VS: $inst"
+          $msvc  = Get-ChildItem "$inst\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending
+          $short = ($msvc[0].Name -split '\.')[0..1] -join '.'
+          $map   = @{ '14.5' = 'v145'; '14.4' = 'v144'; '14.3' = 'v143'; '14.2' = 'v142' }
+          $ts    = $map[$short]
+          if (-not $ts) { throw "No known toolset for MSVC $short" }
+          Write-Host "Using PlatformToolset=$ts (MSVC $short)"
+          "toolset=$ts" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: NuGet restore (packages.config -> packages\)
+        shell: pwsh
+        working-directory: simplewall
+        run: |
+          Invoke-WebRequest "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" -OutFile nuget.exe
+          .\nuget.exe restore simplewall.sln -PackagesDirectory packages -NonInteractive
+
+      - name: Build ${{ matrix.platform }} Release
+        shell: pwsh
+        working-directory: simplewall
+        run: |
+          msbuild simplewall.sln `
+            -m `
+            -p:Configuration=Release `
+            -p:Platform=${{ matrix.platform }} `
+            -p:PlatformToolset=${{ steps.toolset.outputs.toolset }} `
+            -verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Show result + checksum
+        shell: pwsh
+        run: |
+          Get-ChildItem simplewall\bin -Recurse -Filter simplewall.exe |
+            ForEach-Object { "{0}`n  {1} bytes`n  sha256 {2}" -f $_.FullName, $_.Length, (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: simplewall-${{ matrix.platform }}
+          path: simplewall/bin/**/simplewall.exe
+          if-no-files-found: error
