@@ -55,12 +55,24 @@ jobs:
           if (-not (Test-Path $vswhere)) { throw "vswhere not found - no Visual Studio on runner" }
           $inst = & $vswhere -latest -products * -property installationPath
           Write-Host "VS: $inst"
-          $msvc  = Get-ChildItem "$inst\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending
-          $short = ($msvc[0].Name -split '\.')[0..1] -join '.'
-          $map   = @{ '14.5' = 'v145'; '14.4' = 'v144'; '14.3' = 'v143'; '14.2' = 'v142' }
-          $ts    = $map[$short]
-          if (-not $ts) { throw "No known toolset for MSVC $short" }
-          Write-Host "Using PlatformToolset=$ts (MSVC $short)"
+
+          # Canonical source: VS ships one Microsoft.VCToolsVersion.<toolset>.default.txt
+          # per toolset it can build with (v145 / v144 / v143 ...). No hardcoded map.
+          $ts = Get-ChildItem (Join-Path $inst 'VC\Auxiliary\Build') `
+                  -Filter 'Microsoft.VCToolsVersion.v*.default.txt' -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.Name -replace '^Microsoft\.VCToolsVersion\.', '' -replace '\.default\.txt$', '' } |
+                Sort-Object -Descending |
+                Select-Object -First 1
+
+          if (-not $ts) {
+            # Fallback: MSVC 14.NX -> v14N   (14.51 -> v145, 14.38 -> v143, 14.29 -> v142)
+            $msvc = Get-ChildItem (Join-Path $inst 'VC\Tools\MSVC') -Directory |
+                    Sort-Object { [version]$_.Name } -Descending
+            $seg  = $msvc[0].Name -split '\.'
+            $ts   = 'v14' + $seg[1][0]
+          }
+
+          Write-Host "Using PlatformToolset=$ts"
           "toolset=$ts" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: NuGet restore (packages.config -> packages\)
